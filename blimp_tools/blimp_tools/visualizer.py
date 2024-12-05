@@ -6,8 +6,8 @@ from tf2_ros import TransformBroadcaster
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
-from .KinematicEstimation import DeadReckoning
-from .KinematicEstimation import SensorDataFilter
+
+from KinematicEstimation import DeadReckoning, SensorDataFilter
 
 class IMUTfPublisher(Node):
     def __init__(self):

@@ -2,8 +2,7 @@ from setuptools import find_packages, setup
 import os
 from glob import glob
 
-
-package_name = 'blimp_tools'
+package_name = 'flight_controller'
 
 setup(
     name=package_name,
@@ -13,8 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-      (os.path.join('lib', package_name, 'KinematicEstimation'), glob('../KinematicEstimation/*.py')),
-
+        (os.path.join('lib', package_name, 'KinematicEstimation'), glob('../KinematicEstimation/*.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -25,7 +23,9 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'visualizer = blimp_tools.visualizer:main',
+            'magnetometer_controller = flight_controller.controller:main',
+            'yaw_controller_with_joystick = flight_controller.yaw_controller:main',
+            'yaw_data_collector = flight_controller.collect_yaw_data:main',
         ],
     },
 )
