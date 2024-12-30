@@ -1,6 +1,6 @@
 # BLIMP ROS2 Nodes
 
-A ROS2 package for blimp flight control and joystick integration, providing nodes for flight control, yaw management, and kinematic state estimation. Still under development and testing. Developed for the blimp v1 @ SML-MSU.
+A ROS2 package for blimp flight control and joystick integration, providing nodes for flight control, yaw management, and kinematic state estimation. Still under development and testing. Developed for the blimp v1 @ SML-MSU. (FW: https://github.com/roboticvedant/blimp-controller
 
 ## Features
 
