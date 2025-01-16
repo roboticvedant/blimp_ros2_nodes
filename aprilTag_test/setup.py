@@ -11,6 +11,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', ['launch/april_tag_tool.launch.py']),
+        ('share/' + package_name + '/launch', ['launch/camera_multi.launch.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -21,6 +22,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'tag_detect = aprilTag_test.tag_detect:main',
+            'transform_manager = aprilTag_test.transform_manager:main',
         ],
     },
 )
