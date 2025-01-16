@@ -41,7 +41,7 @@ class TransformManagerNode(Node):
         self.tag_subs = {}  # Store subscribers for each tag
         
         # Timer to publish the complete TF tree
-        self.create_timer(0.1, self.publish_tf_tree)  # 10Hz
+        self.create_timer(0.033, self.publish_tf_tree)  # 30Hz
         
         self.get_logger().info('Transform manager initialized')
 

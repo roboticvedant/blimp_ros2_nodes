@@ -19,13 +19,18 @@ def generate_launch_description():
         debug_arg,
 
         # USB Camera 1
-        ExecuteProcess(
-            cmd=['ros2', 'run', 'usb_cam', 'usb_cam_node_exe',
-                 '--ros-args', '-p', 'video_device:=/dev/video0',
-                 '-r', 'image_raw:=/camera1/image_raw'],
-            output='screen'
+        Node(
+            package='usb_cam',
+            executable='usb_cam_node_exe',
+            name='camera1',
+            output='screen',
+            parameters=[{
+                'video_device': '/dev/video0'
+            }],
+            remappings=[
+                ('image_raw', '/camera1/image_raw')
+            ]
         ),
-
         # AprilTag detector node for camera 1
         Node(
             package='aprilTag_test',
