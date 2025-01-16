@@ -36,6 +36,9 @@ class AprilTagDetectorNode(Node):
         self.tag_family = self.get_parameter('tag_family').value
         self.get_debug_image = self.get_parameter('get_debug_image').value
 
+        #have a list of expected tag id to filter false positives
+        self.expected_tag_ids = [0, 1]
+
         # Load camera calibration
         try:
             with open(self.calib_file, "r") as file:
@@ -121,6 +124,10 @@ class AprilTagDetectorNode(Node):
             )
 
             for detection in detections:
+                if detection.tag_id not in self.expected_tag_ids:
+                    self.get_logger().warn(f"Tag ID {detection.tag_id} not in expected list, skipping")
+                    continue
+
                 print("Tag ID:", detection.tag_id)
                 print("Tag Center:", detection.center)
                 print("Tag Corners:", detection.corners)
