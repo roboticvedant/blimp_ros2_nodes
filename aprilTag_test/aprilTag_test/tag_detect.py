@@ -10,6 +10,7 @@ import numpy as np
 import yaml
 import os
 from cv_bridge import CvBridge
+from scipy.spatial.transform import Rotation as R
 
 class AprilTagDetectorNode(Node):
     def __init__(self):
@@ -133,7 +134,9 @@ class AprilTagDetectorNode(Node):
 
                     # Orientation (rotation matrix to quaternion)
                     r = detection.pose_R
-                    qw, qx, qy, qz = self._rotation_matrix_to_quaternion(r)
+                    # Convert rotation matrix to quaternion using SciPy
+                    rotation = R.from_matrix(r)
+                    qx, qy, qz, qw = rotation.as_quat()  # SciPy gives quaternion in [qx, qy, qz, qw]
                     pose_msg.pose.orientation.w = float(qw)
                     pose_msg.pose.orientation.x = float(qx)
                     pose_msg.pose.orientation.y = float(qy)
@@ -162,36 +165,6 @@ class AprilTagDetectorNode(Node):
 
         except Exception as e:
             self.get_logger().error(f'Error in image callback: {str(e)}')
-
-    def _rotation_matrix_to_quaternion(self, r):
-        """Convert a 3x3 rotation matrix to a quaternion"""
-        trace = r[0, 0] + r[1, 1] + r[2, 2]
-        if trace > 0:
-            S = np.sqrt(trace + 1.0) * 2
-            qw = 0.25 * S
-            qx = (r[2, 1] - r[1, 2]) / S
-            qy = (r[0, 2] - r[2, 0]) / S
-            qz = (r[1, 0] - r[0, 1]) / S
-        else:
-            if r[0, 0] > r[1, 1] and r[0, 0] > r[2, 2]:
-                S = np.sqrt(1.0 + r[0, 0] - r[1, 1] - r[2, 2]) * 2
-                qw = (r[2, 1] - r[1, 2]) / S
-                qx = 0.25 * S
-                qy = (r[0, 1] + r[1, 0]) / S
-                qz = (r[0, 2] + r[2, 0]) / S
-            elif r[1, 1] > r[2, 2]:
-                S = np.sqrt(1.0 + r[1, 1] - r[0, 0] - r[2, 2]) * 2
-                qw = (r[0, 2] - r[2, 0]) / S
-                qx = (r[0, 1] + r[1, 0]) / S
-                qy = 0.25 * S
-                qz = (r[1, 2] + r[2, 1]) / S
-            else:
-                S = np.sqrt(1.0 + r[2, 2] - r[0, 0] - r[1, 1]) * 2
-                qw = (r[1, 0] - r[0, 1]) / S
-                qx = (r[0, 2] + r[2, 0]) / S
-                qy = (r[1, 2] + r[2, 1]) / S
-                qz = 0.25 * S
-        return qw, qx, qy, qz
 
     def __del__(self):
         """Cleanup"""
