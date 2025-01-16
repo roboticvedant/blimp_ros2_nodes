@@ -24,13 +24,17 @@ class AprilTagDetectorNode(Node):
         self.declare_parameter('camera_name', 'camera1')
         self.declare_parameter('camera_topic', '/camera1/image_raw')
         self.declare_parameter('tag_size', 0.100)
+        self.declare_parameter('tag_family', 'tag25h9')
         self.declare_parameter('calib_file', os.path.expanduser('~/Desktop/ost.yaml'))
+        self.declare_parameter('get_debug_image', False)
 
         # Get parameters
         self.camera_name = self.get_parameter('camera_name').value
         self.camera_topic = self.get_parameter('camera_topic').value
         self.tag_size = self.get_parameter('tag_size').value
         self.calib_file = self.get_parameter('calib_file').value
+        self.tag_family = self.get_parameter('tag_family').value
+        self.get_debug_image = self.get_parameter('get_debug_image').value
 
         # Load camera calibration
         try:
@@ -45,7 +49,7 @@ class AprilTagDetectorNode(Node):
 
         # Initialize detector
         self._detector = Detector(
-            families='tag25h9',
+            families= self.tag_family,
             nthreads=1,
             quad_decimate=1.0,
             quad_sigma=0.0,
@@ -62,8 +66,9 @@ class AprilTagDetectorNode(Node):
         )
 
         # Initialize display window
-        self._window_name = f'AprilTag Detections - {self.camera_name}'
-        cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL)
+        if self.get_debug_image:
+            self._window_name = f'AprilTag Detections - {self.camera_name}'
+            cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL)
 
         self.get_logger().info(f'AprilTag detector initialized for {self.camera_name}')
 
@@ -147,21 +152,23 @@ class AprilTagDetectorNode(Node):
                     publisher = self._get_publisher(tag_id)
                     publisher.publish(pose_msg)
                 print( "Pose:", detection.pose_t, detection.pose_R)
-                # Draw detection on the image
-                corners = np.array(detection.corners, dtype=np.int32)
-                cv2.polylines(cv_image, [corners.reshape((-1, 1, 2))], True, (0, 255, 0), 2)
-                center = tuple(map(int, detection.center))
-                cv2.putText(cv_image, f"ID: {detection.tag_id}", (center[0] - 20, center[1] - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-                if detection.pose_t is not None:
-                    dist = np.linalg.norm(detection.pose_t)
-                    cv2.putText(cv_image, f"Dist: {dist:.2f}m", (center[0] - 20, center[1] + 20),
+                if self.get_debug_image:
+                    # Draw detection on the image
+                    corners = np.array(detection.corners, dtype=np.int32)
+                    cv2.polylines(cv_image, [corners.reshape((-1, 1, 2))], True, (0, 255, 0), 2)
+                    center = tuple(map(int, detection.center))
+                    cv2.putText(cv_image, f"ID: {detection.tag_id}", (center[0] - 20, center[1] - 10),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
+                    if detection.pose_t is not None:
+                        dist = np.linalg.norm(detection.pose_t)
+                        cv2.putText(cv_image, f"Dist: {dist:.2f}m", (center[0] - 20, center[1] + 20),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
             # Show image
-            cv2.imshow(self._window_name, cv_image)
-            cv2.waitKey(1)
+            if self.get_debug_image:
+                cv2.imshow(self._window_name, cv_image)
+                cv2.waitKey(1)
 
         except Exception as e:
             self.get_logger().error(f'Error in image callback: {str(e)}')
