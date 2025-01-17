@@ -2,197 +2,288 @@
 
 import rclpy
 from rclpy.node import Node
-from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster, Buffer, TransformListener
+from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import PoseStamped, TransformStamped
 import numpy as np
 from transforms3d.quaternions import mat2quat, quat2mat
-import math
+import networkx as nx
+import time
+from typing import Dict, Optional, List, Tuple
+
+class Transform:
+    def __init__(self, translation: np.ndarray, rotation: np.ndarray, timestamp: float = None):
+        self.translation = translation
+        self.rotation = rotation
+        self.timestamp = timestamp if timestamp else time.time()
+
+    @staticmethod
+    def from_pose(msg: PoseStamped) -> 'Transform':
+        return Transform(
+            translation=np.array([
+                msg.pose.position.x,
+                msg.pose.position.y,
+                msg.pose.position.z
+            ]),
+            rotation=quat2mat([
+                msg.pose.orientation.w,
+                msg.pose.orientation.x,
+                msg.pose.orientation.y,
+                msg.pose.orientation.z
+            ])
+        )
+
+    def inverse(self) -> 'Transform':
+        inv_rot = self.rotation.T
+        inv_trans = -np.dot(inv_rot, self.translation)
+        return Transform(inv_trans, inv_rot, self.timestamp)
+
+    def compose(self, other: 'Transform') -> 'Transform':
+        final_rot = np.dot(self.rotation, other.rotation)
+        final_trans = np.dot(self.rotation, other.translation) + self.translation
+        return Transform(final_trans, final_rot, max(self.timestamp, other.timestamp))
+
+    @staticmethod
+    def average_transforms(transforms: List['Transform'], 
+                         weights: Optional[List[float]] = None) -> 'Transform':
+        if not transforms:
+            raise ValueError("No transforms to average")
+            
+        if weights is None:
+            weights = [1.0/len(transforms)] * len(transforms)
+        weights = np.array(weights) / np.sum(weights)
+        
+        # Average translations
+        avg_trans = np.zeros(3)
+        for t, w in zip(transforms, weights):
+            avg_trans += w * t.translation
+            
+        # Average rotations using quaternions
+        quats = [mat2quat(t.rotation) for t in transforms]
+        for i in range(1, len(quats)):
+            if np.dot(quats[0], quats[i]) < 0:
+                quats[i] = -quats[i]
+        avg_quat = np.zeros(4)
+        for q, w in zip(quats, weights):
+            avg_quat += w * q
+        avg_quat /= np.linalg.norm(avg_quat)
+        
+        return Transform(avg_trans, quat2mat(avg_quat), max(t.timestamp for t in transforms))
 
 class TransformManagerNode(Node):
     def __init__(self):
         super().__init__('transform_manager')
         
-        # Initialize transform broadcasters
+        # Initialize transform broadcaster
         self.tf_broadcaster = TransformBroadcaster(self)
-        self.static_broadcaster = StaticTransformBroadcaster(self)
         
-        # Initialize TF buffer and listener
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+        # Create transform graph
+        self.transform_graph = nx.Graph()
+        self.transform_edges: Dict[Tuple[str, str], Transform] = {}
         
-        # Store camera transforms relative to tag0
-        self.camera_transforms = {}
-        self.tag_transforms = {}
+        # Store camera and tag transforms
+        self.static_tags: Dict[str, Transform] = {}  # tag -> tag0 transforms
+        self.robot_observations: Dict[Tuple[str, int], Transform] = {}  # (camera, tag) -> transform
         
-        # Create subscriptions for cameras
+        # Parameters
         self.declare_parameter('camera_names', ['camera1', 'camera2'])
+        self.declare_parameter('publish_rate', 30.0)
+        
         self.camera_names = self.get_parameter('camera_names').value
+        self.static_tag_threshold = 20
         
-        # Subscribe to tag0 poses from each camera to establish base transforms
-        for camera in self.camera_names:
-            self.create_subscription(
-                PoseStamped,
-                f'/tag0/{camera}',
-                lambda msg, camera=camera: self.tag0_callback(msg, camera),
-                10
-            )
+        # Camera correction for overhead mounting
+        self.camera_correction = np.array([
+            [ 0,  0,  1],  # Forward
+            [-1,  0,  0],  # Left
+            [ 0, -1,  0]   # Up
+        ])
         
-        # Subscribe to other tag poses
-        self.tag_subs = {}  # Store subscribers for each tag
+        # Setup subscribers
+        self.setup_subscribers()
         
-        # Timer to publish the complete TF tree
-        self.create_timer(0.033, self.publish_tf_tree)  # 30Hz
+        # Timer for publishing transforms
+        publish_period = 1.0 / self.get_parameter('publish_rate').value
+        self.create_timer(publish_period, self.publish_transforms)
         
         self.get_logger().info('Transform manager initialized')
 
-    def tag0_callback(self, msg, camera_name):
-        """Handle poses of tag0 from different cameras to establish base reference frame"""
-        try:
-            # Create transform from camera to tag0
-            transform = TransformStamped()
-            transform.header = msg.header
-            transform.header.frame_id = f"{camera_name}_optical_frame"
-            transform.child_frame_id = "tag0"
-            
-            # Copy pose to transform
-            transform.transform.translation.x = msg.pose.position.x
-            transform.transform.translation.y = msg.pose.position.y
-            transform.transform.translation.z = msg.pose.position.z
-            transform.transform.rotation = msg.pose.orientation
-            
-            # Store the transform
-            self.camera_transforms[camera_name] = transform
-            
-            # Subscribe to other tags for this camera if not already subscribed
-            self.subscribe_to_other_tags(camera_name)
-            
-        except Exception as e:
-            self.get_logger().error(f'Error processing tag0 pose from {camera_name}: {str(e)}')
-
-    def subscribe_to_other_tags(self, camera_name):
-        """Create subscriptions for other tags from this camera"""
-        for tag_id in range(1, 10):  # Adjust range based on expected number of tags
-            topic = f'/tag{tag_id}/{camera_name}'
-            if (tag_id, camera_name) not in self.tag_subs:
+    def setup_subscribers(self):
+        self.tag_subs = []
+        for camera in self.camera_names:
+            for tag_id in range(50):  # Assuming max 50 tags
+                topic = f'/tag{tag_id}/{camera}'
                 sub = self.create_subscription(
                     PoseStamped,
                     topic,
-                    lambda msg, tag_id=tag_id, camera=camera_name: self.tag_callback(msg, tag_id, camera),
-                    10
-                )
-                self.tag_subs[(tag_id, camera_name)] = sub
+                    lambda msg, c=camera, t=tag_id: self.tag_callback(msg, c, t),
+                    10)
+                self.tag_subs.append(sub)
 
-    def tag_callback(self, msg, tag_id, camera_name):
-        """Handle poses of other tags"""
-        try:
-            if camera_name in self.camera_transforms:
-                # Store the tag's pose relative to the camera
-                key = (tag_id, camera_name)
-                if key not in self.tag_transforms:
-                    self.tag_transforms[key] = {}
-                
-                self.tag_transforms[key] = {
-                    'header': msg.header,
-                    'translation': [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z],
-                    'rotation': [msg.pose.orientation.w, msg.pose.orientation.x, 
-                               msg.pose.orientation.y, msg.pose.orientation.z]
-                }
-                
-        except Exception as e:
-            self.get_logger().error(f'Error processing tag {tag_id} pose from {camera_name}: {str(e)}')
+    def add_transform_edge(self, frame1: str, frame2: str, transform: Transform):
+        """Add transform to graph"""
+        self.transform_graph.add_edge(frame1, frame2)
+        self.transform_edges[(frame1, frame2)] = transform
+        # Also store inverse transform
+        self.transform_edges[(frame2, frame1)] = transform.inverse()
 
-    def compute_tag0_to_tag_transform(self, tag_id, camera_name):
-        """Compute transform from tag0 to another tag using camera-tag0 and camera-tag transforms"""
+    def find_transform(self, source: str, target: str) -> Optional[Transform]:
+        """Find transform between frames using graph"""
         try:
-            if camera_name not in self.camera_transforms:
+            if not (self.transform_graph.has_node(source) and 
+                   self.transform_graph.has_node(target)):
                 return None
-                
-            key = (tag_id, camera_name)
-            if key not in self.tag_transforms:
+
+            # Find shortest path
+            path = nx.shortest_path(self.transform_graph, source, target)
+            if len(path) < 2:
                 return None
+
+            # Compose transforms along path
+            result = None
+            for i in range(len(path) - 1):
+                start, end = path[i:i+2]
+                transform = self.transform_edges.get((start, end))
+                if transform is None:
+                    return None
+                    
+                if result is None:
+                    result = transform
+                else:
+                    result = result.compose(transform)
             
-            # Get camera to tag0 transform (inverse it)
-            cam_to_tag0 = self.camera_transforms[camera_name]
-            tag0_rot = quat2mat([cam_to_tag0.transform.rotation.w,
-                               cam_to_tag0.transform.rotation.x,
-                               cam_to_tag0.transform.rotation.y,
-                               cam_to_tag0.transform.rotation.z])
-            tag0_trans = np.array([cam_to_tag0.transform.translation.x,
-                                 cam_to_tag0.transform.translation.y,
-                                 cam_to_tag0.transform.translation.z])
+            return result
             
-            # Get camera to tag transform
-            tag_data = self.tag_transforms[key]
-            tag_rot = quat2mat(tag_data['rotation'])
-            tag_trans = np.array(tag_data['translation'])
-            
-            # Compute tag0 to tag transform
-            relative_rot = np.dot(tag0_rot.T, tag_rot)
-            relative_trans = np.dot(tag0_rot.T, tag_trans - tag0_trans)
-            
-            # Create transform message
-            transform = TransformStamped()
-            transform.header = tag_data['header']
-            transform.header.frame_id = "tag0"
-            transform.child_frame_id = f"tag{tag_id}"
-            
-            # Set translation
-            transform.transform.translation.x = float(relative_trans[0])
-            transform.transform.translation.y = float(relative_trans[1])
-            transform.transform.translation.z = float(relative_trans[2])
-            
-            # Set rotation
-            quat = mat2quat(relative_rot)
-            transform.transform.rotation.w = float(quat[0])
-            transform.transform.rotation.x = float(quat[1])
-            transform.transform.rotation.y = float(quat[2])
-            transform.transform.rotation.z = float(quat[3])
-            
-            return transform
-            
-        except Exception as e:
-            self.get_logger().error(f'Error computing transform for tag {tag_id}: {str(e)}')
+        except nx.NetworkXNoPath:
             return None
 
-    def publish_tf_tree(self):
-        """Publish the complete TF tree"""
+    def tag_callback(self, msg: PoseStamped, camera_name: str, tag_id: int):
+        try:
+            # Convert message to transform
+            camera_tf = Transform.from_pose(msg)
+            
+            # Apply camera correction
+            camera_tf.rotation = np.dot(camera_tf.rotation, self.camera_correction)
+            
+            frame1 = camera_name
+            frame2 = f'tag{tag_id}'
+            
+            if tag_id < self.static_tag_threshold:  # Static tag
+                # Add to transform graph
+                self.add_transform_edge(frame1, frame2, camera_tf)
+                
+                # Try to update static tag transform relative to tag0
+                if frame2 != 'tag0':
+                    tag_to_ref = self.find_transform(frame2, 'tag0')
+                    if tag_to_ref is not None:
+                        self.static_tags[frame2] = tag_to_ref
+                
+            else:  # Robot tag
+                # First find camera's transform to tag0
+                camera_to_ref = self.find_transform(camera_name, 'tag0')
+                if camera_to_ref is not None:
+                    # Store robot tag observation
+                    self.robot_observations[(camera_name, tag_id)] = camera_tf
+                    
+        except Exception as e:
+            self.get_logger().error(f'Error in tag callback: {str(e)}')
+
+    def get_robot_tag_transform(self, tag_id: int) -> Optional[Transform]:
+        """Compute average transform for robot tag"""
+        current_time = time.time()
+        valid_observations = []
+        
+        # Collect recent observations
+        for (camera, tid), transform in self.robot_observations.items():
+            if (tid == tag_id and 
+                current_time - transform.timestamp < 0.1):  # Last 100ms
+                
+                # Get camera's transform to tag0
+                camera_to_ref = self.find_transform(camera, 'tag0')
+                if camera_to_ref is not None:
+                    # Transform robot tag to tag0 frame
+                    tag_in_ref = camera_to_ref.compose(transform)
+                    valid_observations.append(tag_in_ref)
+        
+        if not valid_observations:
+            return None
+            
+        # Average all valid observations
+        if len(valid_observations) == 1:
+            return valid_observations[0]
+            
+        # Weight by recency
+        timestamps = np.array([obs.timestamp for obs in valid_observations])
+        max_time = np.max(timestamps)
+        weights = 1.0 / (1.0 + (max_time - timestamps))
+        
+        return Transform.average_transforms(valid_observations, weights)
+
+    def create_transform_msg(self, parent: str, child: str, 
+                           transform: Transform, current_time) -> TransformStamped:
+        """Create TransformStamped message"""
+        msg = TransformStamped()
+        msg.header.stamp = current_time
+        msg.header.frame_id = parent
+        msg.child_frame_id = child
+        
+        msg.transform.translation.x = float(transform.translation[0])
+        msg.transform.translation.y = float(transform.translation[1])
+        msg.transform.translation.z = float(transform.translation[2])
+        
+        quat = mat2quat(transform.rotation)
+        msg.transform.rotation.w = float(quat[0])
+        msg.transform.rotation.x = float(quat[1])
+        msg.transform.rotation.y = float(quat[2])
+        msg.transform.rotation.z = float(quat[3])
+        
+        return msg
+
+    def publish_transforms(self):
         try:
             current_time = self.get_clock().now().to_msg()
             
-            # Publish camera to tag0 transforms
-            for camera_name, transform in self.camera_transforms.items():
-                transform.header.stamp = current_time
-                self.tf_broadcaster.sendTransform(transform)
+            # Publish camera transforms
+            for camera in self.camera_names:
+                transform = self.find_transform(camera, 'tag0')
+                if transform is not None:
+                    msg = self.create_transform_msg('tag0', camera, transform, current_time)
+                    self.tf_broadcaster.sendTransform(msg)
             
-            # Publish tag0 to other tag transforms
-            for tag_id in range(1, 10):  # Adjust range based on expected number of tags
-                best_transform = None
-                best_camera = None
-                
-                # Find the best transform from available cameras
-                for camera_name in self.camera_names:
-                    transform = self.compute_tag0_to_tag_transform(tag_id, camera_name)
+            # Publish static tag transforms
+            for tag_name, transform in self.static_tags.items():
+                msg = self.create_transform_msg('tag0', tag_name, transform, current_time)
+                self.tf_broadcaster.sendTransform(msg)
+            
+            # Publish robot tag transforms
+            seen_tags = set()
+            for (_, tag_id) in self.robot_observations.keys():
+                if tag_id not in seen_tags and tag_id >= self.static_tag_threshold:
+                    seen_tags.add(tag_id)
+                    transform = self.get_robot_tag_transform(tag_id)
                     if transform is not None:
-                        best_transform = transform
-                        best_camera = camera_name
-                        break  # Use the first available transform for now
-                
-                if best_transform is not None:
-                    best_transform.header.stamp = current_time
-                    self.tf_broadcaster.sendTransform(best_transform)
-                    
+                        msg = self.create_transform_msg('tag0', f'tag{tag_id}', 
+                                                      transform, current_time)
+                        self.tf_broadcaster.sendTransform(msg)
+                        
+                        # Debug output for multi-camera observations
+                        num_observers = sum(1 for k in self.robot_observations.keys() 
+                                         if k[1] == tag_id)
+                        if num_observers > 1:
+                            self.get_logger().info(
+                                f'Robot tag{tag_id} averaged from {num_observers} cameras'
+                            )
+            
         except Exception as e:
-            self.get_logger().error(f'Error publishing TF tree: {str(e)}')
+            self.get_logger().error(f'Error publishing transforms: {str(e)}')
 
 def main(args=None):
     rclpy.init(args=args)
-    node = TransformManagerNode()
     try:
+        node = TransformManagerNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
         rclpy.shutdown()
 
 if __name__ == '__main__':

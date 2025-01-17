@@ -25,7 +25,7 @@ def generate_launch_description():
             name='camera1',
             output='screen',
             parameters=[{
-                'video_device': '/dev/video0'
+                'video_device': '/dev/video2'
             }],
             remappings=[
                 ('image_raw', '/camera1/image_raw')
@@ -39,7 +39,7 @@ def generate_launch_description():
             parameters=[{
                 'camera_name': 'camera1',
                 'camera_topic': '/camera1/image_raw',
-                'calib_file': os.path.expanduser('~/Desktop/ost.yaml'),
+                'calib_file': os.path.expanduser('~/Desktop/Calib/Camera2/ost.yaml'),
                 'tag_size': 0.100,
                 'tag_family': 'tag25h9',
                 'get_debug_image': debug_flag
